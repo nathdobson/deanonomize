@@ -1,95 +1,216 @@
+#![feature(drain_filter)]
 #![allow(dead_code, unused_imports, unused_variables)]
+
+
 extern crate proc_macro;
 
-use proc_macro::{TokenStream};
+use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 
-use syn::{parse_macro_input, DeriveInput, Item, Ident, ReturnType, Type, FnArg, Visibility, GenericParam};
+use syn::{parse_macro_input, DeriveInput, Item, Ident, ReturnType, Type, FnArg, Visibility, GenericParam, TraitItem, ItemFn, ItemTrait, Attribute, Generics, Signature, ItemImpl, ImplItem, AttributeArgs, WhereClause};
 use quote::quote;
-use proc_macro2::Span;
+use proc_macro2::{Span, TokenTree};
 use syn::parse_quote;
 use syn::spanned::Spanned;
 use quote::format_ident;
+use itertools::Itertools;
+use std::mem;
+use syn::punctuated::Punctuated;
 
-/// Example of user-defined [procedural macro attribute][1].
-///
-/// [1]: https://doc.rust-lang.org/reference/procedural-macros.html#attribute-macros
 #[proc_macro_attribute]
 pub fn deanonymize(args: TokenStream, input: TokenStream) -> TokenStream {
-    let future_name = parse_macro_input!(args as Ident);
     let input = parse_macro_input!(input as Item);
-    let input = match &input {
-        Item::Fn(f) => f,
-        _ => panic!("Expected fn"),
-    };
+    match &input {
+        Item::Fn(f) => deanonymize_fn(args, f),
+        Item::Trait(t) => deanonymize_trait(args, t),
+        Item::Impl(i) => deanonymize_impl(args, i),
+        _ => panic!("Expected fn or trait"),
+    }
+}
+
+struct SignatureExtra {
+    fun_name: Ident,
+    mod_name: Ident,
+    input_types: Vec<Type>,
+    input_names: Vec<TokenStream2>,
+    input_names_selfy: Vec<TokenStream2>,
+    input_selfy: TokenStream2,
+    input_not_selfy: TokenStream2,
+    generics: GenericsExtra,
+}
+
+struct GenericsExtra {
+    gen_params: Generics,
+    gen_idents_turbofish: TokenStream2,
+    gen_idents_no_lifetimes_turbofish: TokenStream2,
+    gen_idents_brackets: TokenStream2,
+    gen_where: Option<WhereClause>,
+    phantom_args: TokenStream2,
+}
+
+impl SignatureExtra {
+    fn new(sig: &Signature, self_type: Option<&Type>) -> Self {
+        let fun_name = sig.ident.clone();
+        let mod_name = format_ident!("__deanonymize_internal__{}", fun_name);
+        let generics = GenericsExtra::new(&sig.generics);
+        let mut self_arg = None;
+        let input_types: Vec<_> =
+            sig.inputs.iter().map(|input| match input {
+                FnArg::Receiver(r) => {
+                    self_arg = Some(r);
+                    let self_type = self_type.unwrap().clone();
+                    match r.reference.as_ref() {
+                        None => self_type,
+                        Some((and, l)) => {
+                            match l {
+                                None => {
+                                    if let Some(mu) = r.mutability {
+                                        parse_quote!(#and #mu #self_type)
+                                    } else {
+                                        parse_quote!(#and #self_type)
+                                    }
+                                }
+                                Some(l) => {
+                                    if let Some(mu) = r.mutability {
+                                        parse_quote!(#and #l #mu #self_type)
+                                    } else {
+                                        parse_quote!(#and #l #self_type)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                FnArg::Typed(ty) => {
+                    (*ty.ty).clone()
+                }
+            }).collect();
+        let input_names: Vec<TokenStream2> =
+            input_types.iter().enumerate().map(|(index, ty)| {
+                let id = Ident::new(&format!("__deanonymize_internal__{}", index), ty.span());
+                quote!(#id)
+            }).collect();
+        let mut input_names_selfy = input_names.clone();
+        let input_selfy;
+        let input_not_selfy;
+        if let Some(self_arg) = self_arg {
+            let n0 = &input_names[0];
+            let t0 = &input_types[0];
+            let input_names = &input_names[1..];
+            let input_types = &input_types[1..];
+            input_selfy = quote!( #self_arg , #( #input_names : #input_types ),*);
+            input_names_selfy[0] = parse_quote!(self);
+            let inputs: Vec<_> = sig.inputs.iter().skip(1).collect();
+            input_not_selfy = quote!(#n0: #t0 #(, #inputs )*);
+        } else {
+            input_selfy = quote!( #( #input_names : #input_types ),*);
+            let inputs = &sig.inputs;
+            input_not_selfy = quote!(#inputs);
+        };
+
+        SignatureExtra {
+            fun_name,
+            mod_name,
+            generics,
+            input_types,
+            input_names,
+            input_names_selfy,
+            input_selfy,
+            input_not_selfy,
+        }
+    }
+}
+
+impl GenericsExtra {
+    fn new(gen_params: &Generics) -> Self {
+        let gen_idents: Vec<_> =
+            gen_params.params.iter().map(|gen_param| match gen_param {
+                GenericParam::Type(type_param) => {
+                    let ident = &type_param.ident;
+                    quote!(#ident)
+                }
+                GenericParam::Lifetime(life_param) => {
+                    let lifetime = &life_param.lifetime;
+                    quote!(#lifetime)
+                }
+                GenericParam::Const(const_param) => {
+                    let ident = &const_param.ident;
+                    quote!(#ident)
+                }
+            }).collect();
+        let gen_idents_no_lifetimes: Vec<_> =
+            gen_params.params.iter().filter_map(|gen_param| match gen_param {
+                GenericParam::Type(type_param) => {
+                    let ident = &type_param.ident;
+                    Some(quote!(#ident))
+                }
+                GenericParam::Lifetime(life_param) => {
+                    let lifetime = &life_param.lifetime;
+                    None
+                }
+                GenericParam::Const(const_param) => {
+                    let ident = &const_param.ident;
+                    Some(quote!(#ident))
+                }
+            }).collect();
+        let phantom_args: Vec<_> =
+            gen_params.params.iter().map(|gen_param| match gen_param {
+                GenericParam::Type(type_param) => {
+                    let ident = &type_param.ident;
+                    quote!(*mut #ident)
+                }
+                GenericParam::Lifetime(life_param) => {
+                    let lifetime = &life_param.lifetime;
+                    quote!(& #lifetime mut ())
+                }
+                GenericParam::Const(const_param) => {
+                    let ident = &const_param.ident;
+                    quote!([(); #ident])
+                }
+            }).collect();
+        let gen_idents_turbofish =
+            if gen_idents.is_empty() { quote!() } else { quote!(::< #( #gen_idents ),* >) };
+        let gen_idents_no_lifetimes_turbofish =
+            if gen_idents_no_lifetimes.is_empty() { quote!() } else { quote!(::< #( #gen_idents_no_lifetimes ),* >) };
+        let gen_idents_brackets =
+            if gen_idents.is_empty() { quote!() } else { quote!(< #( #gen_idents ),* >) };
+        let phantom_args = quote!(< ( #( #phantom_args ),* ) >);
+        let gen_where = gen_params.where_clause.clone();
+        GenericsExtra {
+            gen_params: gen_params.clone(),
+            gen_idents_turbofish,
+            gen_idents_no_lifetimes_turbofish,
+            gen_idents_brackets,
+            gen_where,
+            phantom_args,
+        }
+    }
+}
+
+fn deanonymize_fn(args: TokenStream, input: &ItemFn) -> TokenStream {
+    let future_name = parse_macro_input!(args as Ident);
     let vis = &input.vis;
-    let fun_name = &input.sig.ident;
-    let mod_name = format_ident!("__deanonymize_internal__{}", fun_name);
-    let gen_params = &input.sig.generics;
-    let gen_idents: Vec<_> =
-        gen_params.params.iter().map(|gen_param| match gen_param {
-            GenericParam::Type(type_param) => {
-                let ident = &type_param.ident;
-                quote!(#ident)
-            }
-            GenericParam::Lifetime(life_param) => {
-                let lifetime = &life_param.lifetime;
-                quote!(#lifetime)
-            }
-            GenericParam::Const(const_param) => {
-                let ident = &const_param.ident;
-                quote!(#ident)
-            }
-        }).collect();
-    let gen_idents_no_lifetimes: Vec<_> =
-        gen_params.params.iter().filter_map(|gen_param| match gen_param {
-            GenericParam::Type(type_param) => {
-                let ident = &type_param.ident;
-                Some(quote!(#ident))
-            }
-            GenericParam::Lifetime(life_param) => {
-                let lifetime = &life_param.lifetime;
-                None
-            }
-            GenericParam::Const(const_param) => {
-                let ident = &const_param.ident;
-                Some(quote!(#ident))
-            }
-        }).collect();
-    let phantom_args: Vec<_> =
-        gen_params.params.iter().map(|gen_param| match gen_param {
-            GenericParam::Type(type_param) => {
-                let ident = &type_param.ident;
-                quote!(::std::cell::Cell<#ident>)
-            }
-            GenericParam::Lifetime(life_param) => {
-                let lifetime = &life_param.lifetime;
-                quote!(& #lifetime mut ())
-            }
-            GenericParam::Const(const_param) => {
-                let ident = &const_param.ident;
-                quote!([(); #ident])
-            }
-        }).collect();
-    let gen_idents_turbofish =
-        if gen_idents.is_empty() { quote!() } else { quote!(::< #( #gen_idents ),* >) };
-    let gen_idents_no_lifetimes_turbofish =
-        if gen_idents_no_lifetimes.is_empty() { quote!() } else { quote!(::< #( #gen_idents_no_lifetimes ),* >) };
-    let gen_idents_brackets =
-        if gen_idents.is_empty() { quote!() } else { quote!(< #( #gen_idents ),* >) };
-    let phantom_args = quote!(< ( #( #phantom_args ),* ) >);
-    let input_types: Vec<_> =
-        input.sig.inputs.iter().map(|input| match input {
-            FnArg::Receiver(_) => panic!("Cannot use self"),
-            FnArg::Typed(ty) => {
-                &*ty.ty
-            }
-        }).collect();
 
 
-    let input_names: Vec<Ident> =
-        input_types.iter().enumerate().map(|(index, ty)| {
-            Ident::new(&format!("__deanonymize_internal__{}", index), ty.span())
-        }).collect();
+    let SignatureExtra {
+        fun_name,
+        mod_name,
+        input_types,
+        input_names,
+        input_names_selfy,
+        input_selfy,
+        input_not_selfy,
+        generics: GenericsExtra {
+            gen_params,
+            gen_idents_turbofish,
+            gen_idents_no_lifetimes_turbofish,
+            gen_idents_brackets,
+            gen_where,
+            phantom_args
+        },
+    } = SignatureExtra::new(&input.sig, None);
+    let predicates = &gen_where.as_ref().map_or(vec![], |x| x.predicates.iter().cloned().collect());
+
     let unit = parse_quote!(());
     let output = match &input.sig.output {
         ReturnType::Default => {
@@ -102,14 +223,12 @@ pub fn deanonymize(args: TokenStream, input: TokenStream) -> TokenStream {
     imp.vis = parse_quote!(pub);
     imp.sig.ident = imp_name.clone();
 
-    println!("{:#?}", input);
-
     let default_imp =
-        if gen_idents_no_lifetimes.is_empty() {
+        if gen_idents_no_lifetimes_turbofish.is_empty() {
             quote!()
         } else {
             quote! {
-                impl #gen_params __deanonymize_internal__Storage #gen_idents_brackets for () {
+                impl #gen_params __deanonymize_internal__Storage #gen_idents_brackets for () #gen_where{
                     default type Array = ();
                 }
             }
@@ -118,32 +237,39 @@ pub fn deanonymize(args: TokenStream, input: TokenStream) -> TokenStream {
     let tokens = quote! {
         #[allow(non_snake_case)]
         mod #mod_name {
+            use super::*;
             #[allow(non_snake_case)]
             #imp
 
-            pub const fn __deanonymize_internal__size_of_future<A, F: Fn<A> + Copy>(f:F) -> usize{
+            pub const fn __deanonymize_internal__size_of_future<A, F: Fn<A> + Copy>(f:F) -> usize
+                where F::Output: Send
+                {
                 ::std::mem::size_of::<F::Output>()
             }
 
-            pub trait __deanonymize_internal__Storage #gen_params{
-                type Array;
+            pub trait __deanonymize_internal__Storage #gen_params #gen_where{
+                type Array: Send + Sync;
             }
 
             #default_imp
 
             impl #gen_params __deanonymize_internal__Storage #gen_idents_brackets for ()
-            where [u8; __deanonymize_internal__size_of_future(#imp_name #gen_idents_no_lifetimes_turbofish)]: Sized {
+            where
+                #( #predicates,)*
+                [u8; __deanonymize_internal__size_of_future(#imp_name #gen_idents_no_lifetimes_turbofish)]: Sized {
                 default type Array = [u8; __deanonymize_internal__size_of_future(#imp_name #gen_idents_no_lifetimes_turbofish)];
             }
+
         }
 
+        #[allow(non_camel_case_types)]
         #[repr(align(8))]
-        pub struct #future_name #gen_params {
+        pub struct #future_name #gen_params #gen_where{
             inner: ::std::mem::MaybeUninit<<() as #mod_name::__deanonymize_internal__Storage #gen_idents_brackets>::Array>,
             phantom: ::std::marker::PhantomData #phantom_args,
         }
 
-        impl #gen_params ::std::future::Future for #future_name #gen_idents_brackets
+        impl #gen_params ::std::future::Future for #future_name #gen_idents_brackets #gen_where
         {
             type Output = #output;
             fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<Self::Output>{
@@ -157,8 +283,11 @@ pub fn deanonymize(args: TokenStream, input: TokenStream) -> TokenStream {
             }
         }
 
+        unsafe impl #gen_params Send for #future_name #gen_idents_brackets #gen_where {}
+
         #[allow(non_snake_case)]
         #vis fn #fun_name #gen_params(#( #input_names : #input_types ),*) -> #future_name #gen_idents_brackets
+        #gen_where
         {
             fn __deanonymize_internal__align_of_future<A, F: Fn<A> + Copy>(f:F) -> usize {
                 ::std::mem::align_of::<F::Output>()
@@ -172,5 +301,173 @@ pub fn deanonymize(args: TokenStream, input: TokenStream) -> TokenStream {
         }
     };
 
+    tokens.into()
+}
+
+fn remove_tag(attrs: &mut Vec<Attribute>) -> Option<Ident> {
+    if let Some(attr) = attrs.drain_filter(
+        |attr| {
+            attr.path.segments.iter().exactly_one()
+                .ok().expect("unexpected path to deanonymize")
+                .ident.to_string() == "deanonymize"
+        }
+    ).exactly_one().ok() {
+        let target = attr.tokens.into_iter().exactly_one().unwrap();
+        let target = match target {
+            TokenTree::Group(target) => target.stream().into_iter().exactly_one().unwrap(),
+            _ => panic!("Parameter must be ident {:?}", target)
+        };
+        match target {
+            TokenTree::Ident(i) => Some(i),
+            _ => panic!(),
+        }
+    } else {
+        None
+    }
+}
+
+fn deanonymize_trait(_args: TokenStream, input: &ItemTrait) -> TokenStream {
+    let mut output = input.clone();
+    let mut new_items: Vec<TraitItem> = vec![];
+    for item in output.items.iter_mut() {
+        match item {
+            TraitItem::Method(method) => {
+                if let Some(target) = remove_tag(&mut method.attrs) {
+                    let GenericsExtra {
+                        gen_params,
+                        gen_idents_turbofish,
+                        ..
+                    } = GenericsExtra::new(&method.sig.generics);
+                    assert!(method.sig.asyncness.take().is_some());
+                    let yielded =
+                        mem::replace(
+                            &mut method.sig.output,
+                            parse_quote!(-> Self :: #target #gen_idents_turbofish),
+                        );
+                    new_items.push(parse_quote!(type #target #gen_params;));
+                }
+            }
+            _ => {}
+        }
+    }
+    output.items.extend(new_items);
+    let tokens = quote!(#output);
+    tokens.into()
+}
+
+fn combine_generics(g1: &Generics, g2: &Generics) -> Generics {
+    let mut combined_params = g1.params.clone();
+    combined_params.extend(g2.params.iter().cloned());
+    let mut predicates = vec![];
+    if let Some(w1) = &g1.where_clause {
+        predicates.extend(w1.predicates.iter().cloned());
+    }
+    if let Some(w2) = &g2.where_clause {
+        predicates.extend(w2.predicates.iter().cloned());
+    }
+    let where_clause = if predicates.is_empty() {
+        None
+    } else {
+        Some(parse_quote!(where #(#predicates),* ))
+    };
+    Generics {
+        lt_token: g1.lt_token.clone(),
+        params: combined_params,
+        gt_token: g2.gt_token.clone(),
+        where_clause,
+    }
+}
+
+fn deanonymize_impl(_args: TokenStream, input: &ItemImpl) -> TokenStream {
+    let mut output = input.clone();
+    let mut extras: Vec<TokenStream2> = vec![];
+    let mut extra_items: Vec<ImplItem> = vec![];
+    for item in output.items.iter_mut() {
+        match item {
+            ImplItem::Method(method) => {
+                let imp = method.clone();
+                if let Some(target) = remove_tag(&mut method.attrs) {
+                    let GenericsExtra {
+                        ..
+                    } = GenericsExtra::new(&output.generics);
+
+                    let SignatureExtra {
+                        fun_name,
+                        input_selfy,
+                        input_not_selfy,
+                        input_names_selfy,
+                        generics: GenericsExtra {
+                            gen_params: gen_params_method,
+                            gen_where: gen_where_method,
+                            ..
+                        },
+                        ..
+                    } = SignatureExtra::new(&method.sig, Some(&output.self_ty));
+
+                    let combined = combine_generics(&output.generics, &method.sig.generics);
+                    let GenericsExtra {
+                        gen_params,
+                        gen_idents_turbofish,
+                        gen_idents_no_lifetimes_turbofish,
+                        gen_idents_brackets,
+                        gen_where,
+                        phantom_args
+                    } = GenericsExtra::new(&combined);
+                    assert!(method.sig.asyncness.take().is_some());
+                    let yielded =
+                        mem::replace(
+                            &mut method.sig.output,
+                            parse_quote!(-> Self :: #target #gen_idents_turbofish),
+                        );
+
+                    let trait_name = match output.trait_.as_ref() {
+                        None => None,
+                        Some(t) => Some(t.1.segments.iter().next().unwrap().ident.clone())
+                    };
+                    let struct_name: Ident = match &*output.self_ty {
+                        Type::Path(x) => { x.path.segments.iter().next().unwrap().ident.clone() }
+                        _ => panic!("Expected impl for path"),
+                    };
+
+                    let imp_name;
+                    let fut_name;
+                    match &trait_name {
+                        Some(trait_name) => {
+                            imp_name = format_ident!("__deanonymize_internal__{}__{}__{}",trait_name,struct_name, method.sig.ident);
+                            fut_name = format_ident!("__deanonymize_internal__{}__{}__{}",trait_name,struct_name, target);
+                        }
+                        None => {
+                            imp_name = format_ident!("__deanonymize_internal__{}__{}",struct_name, method.sig.ident);
+                            fut_name = target.clone();
+                        }
+                    }
+
+                    let imp_body = imp.block;
+                    let ret = &imp.sig.output;
+                    extras.push(quote!(
+                        #[deanonymize(#fut_name)]
+                        async fn #imp_name #gen_params(#input_not_selfy) #ret #gen_where #imp_body
+                    ));
+                    if trait_name.is_some() {
+                        extra_items.push(parse_quote!(
+                            type #target #gen_params_method = #fut_name #gen_idents_brackets;
+                        ));
+                    }
+                    *method = parse_quote!(
+                        #[allow(non_snake_case)]
+                        fn #fun_name #gen_params_method(#input_selfy) -> #fut_name #gen_idents_brackets #gen_where_method {
+                            #imp_name(#( #input_names_selfy ),*)
+                        }
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    output.items.extend(extra_items);
+    let tokens = quote!(
+        #(#extras)*
+        #output
+    );
     tokens.into()
 }

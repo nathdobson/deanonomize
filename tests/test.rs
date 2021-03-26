@@ -1,5 +1,5 @@
 #![allow(dead_code, unused_imports, unused_variables, incomplete_features)]
-#![feature(unboxed_closures, const_fn, const_generics, const_evaluatable_checked, specialization)]
+#![feature(unboxed_closures, const_fn, const_generics, const_evaluatable_checked, specialization, generic_associated_types)]
 
 use std::future::Future;
 use deanonymize::deanonymize;
@@ -22,7 +22,7 @@ mod with_type_arg {
     use deanonymize::deanonymize;
 
     #[deanonymize(WithTypeArg)]
-    pub async fn with_type_arg<T>(x: T) -> T { x }
+    pub async fn with_type_arg<T: Send>(x: T) -> T { x }
 }
 
 mod with_life_arg {
@@ -36,7 +36,48 @@ mod with_life_and_type_arg {
     use deanonymize::deanonymize;
 
     #[deanonymize(WithLifeAndTypeArg)]
-    pub async fn with_life_and_type_arg<'a, T: 'a + Send>(x: &'a T) -> &'a T { x }
+    pub async fn with_life_and_type_arg<'a, T: 'a + Send + Sync>(x: &'a T) -> &'a T { x }
+}
+
+mod with_where {
+    use deanonymize::deanonymize;
+
+    #[deanonymize(WithWhere)]
+    pub async fn with_where<'a, T>(x: &'a T) -> &'a T where T: 'a + Send + Sync { x }
+}
+
+mod picard {
+    use deanonymize::deanonymize;
+    use std::marker::PhantomData;
+
+    #[deanonymize]
+    trait Picard<'b, S: 'b + Send + Sync> {
+        #[deanonymize(Engage)]
+        async fn engage<'a, T: 'a + Send + Sync>(&'a self, x: &'a T) -> &'a T;
+    }
+
+    #[deanonymize]
+    impl<'b, S: 'b + Send + Sync> Picard<'b, S> for Box<()> {
+        #[deanonymize(Engage)]
+        async fn engage<'a, T: 'a + Send + Sync>(&'a self, x: &'a T) -> &'a T {
+            x
+        }
+    }
+}
+
+mod inherent {
+    use deanonymize::deanonymize;
+    use std::marker::PhantomData;
+
+    pub struct Blaz<'b, S: 'b>(PhantomData<&'b S>);
+
+    #[deanonymize]
+    impl<'b, S: 'b + Send + Sync> Blaz<'b, S> {
+        #[deanonymize(Engage)]
+        async fn engage<'a, T: 'a + Send + Sync>(&'a self, x: &'a T) -> &'a T where S: 'a {
+            x
+        }
+    }
 }
 
 mod all {
@@ -46,34 +87,13 @@ mod all {
     pub async fn with_arg(x: usize) -> usize { x }
 
     #[deanonymize(WithTypeArg)]
-    pub async fn with_type_arg<T>(x: T) -> T { x }
+    pub async fn with_type_arg<T: Send>(x: T) -> T { x }
 
     #[deanonymize(WithLifeArg)]
     pub async fn with_life_arg<'a>(x: &'a usize) -> &'a usize { x }
 
     #[deanonymize(WithLifeAndTypeArg)]
-    pub async fn with_life_and_type_arg<'a, T: 'a + Send>(x: &'a T) -> &'a T { x }
-}
-
-
-// pub async fn foo2<T>(x: T) -> T {
-//     with_type_arg::with_type_arg::<T>(x).await
-// }
-
-trait Arrayify<T> {
-    type Imp;
-}
-
-impl<T> Arrayify<T> for () {
-    default type Imp = ();
-}
-
-impl<T> Arrayify<T> for () where [u8; std::mem::size_of::<T>()]: Sized {
-    type Imp = [u8; std::mem::size_of::<T>()];
-}
-
-struct Bar<T: Sized> {
-    array: <() as Arrayify<T>>::Imp,
+    pub async fn with_life_and_type_arg<'a, T: 'a + Send + Sync>(x: &'a T) -> &'a T { x }
 }
 
 #[test]
