@@ -2,11 +2,11 @@
 #![feature(unboxed_closures, const_fn, const_generics, const_evaluatable_checked, specialization, generic_associated_types)]
 
 use std::future::Future;
-use deanonymize::deanonymize;
 use std::task::Wake;
 use std::sync::Arc;
 use std::task::Waker;
 use std::task::Context;
+use deanonymize::deanonymize;
 
 #[deanonymize(Foo)]
 async fn foo() {}
@@ -51,7 +51,7 @@ mod picard {
     use std::marker::PhantomData;
 
     #[deanonymize]
-    trait Picard<'b, S: 'b + Send + Sync> {
+    pub trait Picard<'b, S> where S: 'b + Send + Sync {
         #[deanonymize(Engage)]
         async fn engage<'a, T: 'a + Send + Sync>(&'a self, x: &'a T) -> &'a T;
     }
@@ -68,6 +68,7 @@ mod picard {
 mod inherent {
     use deanonymize::deanonymize;
     use std::marker::PhantomData;
+    use std::mem;
 
     pub struct Blaz<'b, S: 'b>(PhantomData<&'b S>);
 
@@ -75,6 +76,7 @@ mod inherent {
     impl<'b, S: 'b + Send + Sync> Blaz<'b, S> {
         #[deanonymize(Engage)]
         async fn engage<'a, T: 'a + Send + Sync>(&'a self, x: &'a T) -> &'a T where S: 'a {
+            mem::drop(self);
             x
         }
     }
@@ -98,11 +100,14 @@ mod all {
 
 #[test]
 fn test() {
+    use picard::Picard;
+
     let mut fut = Box::pin(async {
         assert_eq!(foo().await, ());
         assert_eq!(with_arg::with_arg(1).await, 1);
         assert_eq!(with_type_arg::with_type_arg(3u8).await, 3u8);
         assert_eq!(with_life_and_type_arg::with_life_and_type_arg(&3u8).await, &3u8);
+        <Box::<()> as Picard<()>>::engage(&Box::new(()),&123).await;
     });
     struct Noop;
     impl Wake for Noop {

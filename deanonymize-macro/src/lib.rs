@@ -5,7 +5,7 @@
 extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{TokenStream as TokenStream2, Group};
 
 use syn::{parse_macro_input, DeriveInput, Item, Ident, ReturnType, Type, FnArg, Visibility, GenericParam, TraitItem, ItemFn, ItemTrait, Attribute, Generics, Signature, ItemImpl, ImplItem, AttributeArgs, WhereClause};
 use quote::quote;
@@ -263,7 +263,7 @@ fn deanonymize_fn(args: TokenStream, input: &ItemFn) -> TokenStream {
         }
 
         #[allow(non_camel_case_types)]
-        #[repr(align(8))]
+        #[repr(align(16))]
         pub struct #future_name #gen_params #gen_where{
             inner: ::std::mem::MaybeUninit<<() as #mod_name::__deanonymize_internal__Storage #gen_idents_brackets>::Array>,
             phantom: ::std::marker::PhantomData #phantom_args,
@@ -344,7 +344,11 @@ fn deanonymize_trait(_args: TokenStream, input: &ItemTrait) -> TokenStream {
                             &mut method.sig.output,
                             parse_quote!(-> Self :: #target #gen_idents_turbofish),
                         );
-                    new_items.push(parse_quote!(type #target #gen_params;));
+                    let yielded: Type = match yielded {
+                        ReturnType::Default => parse_quote!("()"),
+                        ReturnType::Type(_, x) => *x,
+                    };
+                    new_items.push(parse_quote!(type #target #gen_params : ::std::future::Future<Output= #yielded> + Send;));
                 }
             }
             _ => {}
@@ -378,6 +382,22 @@ fn combine_generics(g1: &Generics, g2: &Generics) -> Generics {
     }
 }
 
+fn replace_self(stream: &TokenStream2, body: &TokenTree) -> TokenStream2 {
+    stream.clone().into_iter().map(|tt| match &tt {
+        TokenTree::Group(g) =>
+            TokenTree::Group(Group::new(g.delimiter(), replace_self(&g.stream(), body))),
+        TokenTree::Ident(id) => {
+            if id.to_string() == "self" {
+                body.clone()
+            } else {
+                tt
+            }
+        }
+        TokenTree::Punct(p) => tt,
+        TokenTree::Literal(l) => tt,
+    }).collect()
+}
+
 fn deanonymize_impl(_args: TokenStream, input: &ItemImpl) -> TokenStream {
     let mut output = input.clone();
     let mut extras: Vec<TokenStream2> = vec![];
@@ -396,6 +416,7 @@ fn deanonymize_impl(_args: TokenStream, input: &ItemImpl) -> TokenStream {
                         input_selfy,
                         input_not_selfy,
                         input_names_selfy,
+                        input_names,
                         generics: GenericsExtra {
                             gen_params: gen_params_method,
                             gen_where: gen_where_method,
@@ -425,7 +446,9 @@ fn deanonymize_impl(_args: TokenStream, input: &ItemImpl) -> TokenStream {
                         Some(t) => Some(t.1.segments.iter().next().unwrap().ident.clone())
                     };
                     let struct_name: Ident = match &*output.self_ty {
-                        Type::Path(x) => { x.path.segments.iter().next().unwrap().ident.clone() }
+                        Type::Path(x) => {
+                            Ident::new(&x.path.segments.iter().map(|x| x.ident.clone()).join("__"), output.self_ty.span())
+                        }
                         _ => panic!("Expected impl for path"),
                     };
 
@@ -443,6 +466,8 @@ fn deanonymize_impl(_args: TokenStream, input: &ItemImpl) -> TokenStream {
                     }
 
                     let imp_body = imp.block;
+                    let self_name = &input_names[0];
+                    let imp_body = replace_self(&quote!(#imp_body), &parse_quote!(#self_name));
                     let ret = &imp.sig.output;
                     extras.push(quote!(
                         #[deanonymize(#fut_name)]
