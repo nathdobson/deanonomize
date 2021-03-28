@@ -1,9 +1,9 @@
 #![feature(unboxed_closures, const_fn)]
 //!
-//! This crate provides an attribute macro to make `async fn` work in traits. There are no heap
-//! allocations or dynamic dispatch. However this crate relies on unsafe code and incomplete features,
-//! so you probably shouldn't use it. See [async-trait](https://docs.rs/async-trait/0.1.48/async_trait/)
-//! for a reasonable solution that uses heap allocations and dynamic dispatch.
+//! `deanonymize` is an attribute macro to make `async fn` work in traits without adding runtime overhead.
+//! There are no heap allocations or dynamic dispatch. The generated code relies on unsafe code
+//! and incomplete features, so you should use
+//! [async-trait](https://docs.rs/async-trait/0.1.48/async_trait/) instead.
 //!
 //! ```
 //! #![allow(incomplete_features)]
