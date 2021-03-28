@@ -1,3 +1,4 @@
+
 #![feature(drain_filter)]
 #![allow(dead_code, unused_imports, unused_variables)]
 
@@ -228,7 +229,7 @@ fn deanonymize_fn(args: TokenStream, input: &ItemFn) -> TokenStream {
             quote!()
         } else {
             quote! {
-                impl #gen_params __deanonymize_internal__Storage #gen_idents_brackets for () #gen_where{
+                impl #gen_params ::deanonymize::Storage  for #future_name #gen_idents_brackets #gen_where{
                     default type Array = ();
                 }
             }
@@ -236,36 +237,22 @@ fn deanonymize_fn(args: TokenStream, input: &ItemFn) -> TokenStream {
 
     let tokens = quote! {
         #[allow(non_snake_case)]
-        mod #mod_name {
-            use super::*;
-            #[allow(non_snake_case)]
-            #imp
+        #imp
 
-            pub const fn __deanonymize_internal__size_of_future<A, F: Fn<A> + Copy>(f:F) -> usize
-                where F::Output: Send
-                {
-                ::std::mem::size_of::<F::Output>()
-            }
+        #default_imp
 
-            pub trait __deanonymize_internal__Storage #gen_params #gen_where{
-                type Array: Send + Sync;
-            }
-
-            #default_imp
-
-            impl #gen_params __deanonymize_internal__Storage #gen_idents_brackets for ()
-            where
-                #( #predicates,)*
-                [u8; __deanonymize_internal__size_of_future(#imp_name #gen_idents_no_lifetimes_turbofish)]: Sized {
-                default type Array = [u8; __deanonymize_internal__size_of_future(#imp_name #gen_idents_no_lifetimes_turbofish)];
-            }
-
+        impl #gen_params ::deanonymize::Storage for #future_name #gen_idents_brackets
+        where
+            #( #predicates,)*
+            [u8; ::deanonymize::size_of_future(#imp_name #gen_idents_no_lifetimes_turbofish)]: Sized {
+            default type Array = [u8; ::deanonymize::size_of_future(#imp_name #gen_idents_no_lifetimes_turbofish)];
         }
 
+        // TODO: derive alignment?
         #[allow(non_camel_case_types)]
         #[repr(align(16))]
         pub struct #future_name #gen_params #gen_where{
-            inner: ::std::mem::MaybeUninit<<() as #mod_name::__deanonymize_internal__Storage #gen_idents_brackets>::Array>,
+            inner: ::std::mem::MaybeUninit<<Self as ::deanonymize::Storage>::Array>,
             phantom: ::std::marker::PhantomData #phantom_args,
         }
 
@@ -274,11 +261,18 @@ fn deanonymize_fn(args: TokenStream, input: &ItemFn) -> TokenStream {
             type Output = #output;
             fn poll(self: ::std::pin::Pin<&mut Self>, cx: &mut ::std::task::Context) -> ::std::task::Poll<Self::Output>{
                 unsafe {
-                    const fn __deanonymize_internal__cast_to_future<A, F: Fn<A> + Copy>(x:*mut (), f:F) -> *mut F::Output{
-                        x as *mut F::Output
-                    }
-                    let raw_ptr = &mut self.get_unchecked_mut().inner as *mut _ as *mut ();
-                    ::std::pin::Pin::new_unchecked(&mut *__deanonymize_internal__cast_to_future(raw_ptr, #mod_name::#imp_name #gen_idents_no_lifetimes_turbofish)).poll(cx)
+                    ::deanonymize::cast_to_future_pin_mut(self, #imp_name #gen_idents_no_lifetimes_turbofish).poll(cx)
+                }
+            }
+        }
+
+        impl #gen_params ::std::ops::Drop for #future_name #gen_idents_brackets #gen_where
+        {
+            fn drop(&mut self) {
+                unsafe {
+                    ::std::ptr::drop_in_place(
+                        ::deanonymize::cast_to_future_raw_mut(self,
+                            #imp_name #gen_idents_no_lifetimes_turbofish))
                 }
             }
         }
@@ -287,16 +281,9 @@ fn deanonymize_fn(args: TokenStream, input: &ItemFn) -> TokenStream {
 
         #[allow(non_snake_case)]
         #vis fn #fun_name #gen_params(#( #input_names : #input_types ),*) -> #future_name #gen_idents_brackets
-        #gen_where
-        {
-            fn __deanonymize_internal__align_of_future<A, F: Fn<A> + Copy>(f:F) -> usize {
-                ::std::mem::align_of::<F::Output>()
-            }
-            assert!(::std::mem::align_of::<#future_name #gen_idents_no_lifetimes_turbofish>() >= __deanonymize_internal__align_of_future(#mod_name::#imp_name #gen_idents_no_lifetimes_turbofish));
+        #gen_where {
             unsafe {
-                let imp = ::std::mem::MaybeUninit::new(#mod_name::#imp_name #gen_idents_no_lifetimes_turbofish(#(#input_names),*));
-                let inner: ::std::mem::MaybeUninit<#future_name #gen_idents_brackets> = ::std::mem::transmute_copy(&imp);
-                inner.as_ptr().read()
+                ::deanonymize::force_transmute(#imp_name #gen_idents_no_lifetimes_turbofish(#(#input_names),*))
             }
         }
     };
