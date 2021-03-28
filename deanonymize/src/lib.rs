@@ -15,7 +15,7 @@
 //! pub trait Println {
 //!     // The return type of println will be an associated type called `PrintlnFut`.
 //!     #[deanonymize(PrintlnFut)]
-//!     async fn println<'a, T: Display + Send + Sync>(&'a mut self, x: &'a T) -> ();
+//!     async fn println<'a, T: Display + Send + Sync>(&'a mut self, x: &'a T);
 //! }
 //!
 //! pub struct Stdout;
@@ -23,14 +23,14 @@
 //! #[deanonymize]
 //! impl Println for Stdout {
 //!     #[deanonymize(PrintlnFut)]
-//!     async fn println<'a, T: Display + Send + Sync>(&'a mut self, x: &'a T) -> () {
+//!     async fn println<'a, T: Display + Send + Sync>(&'a mut self, x: &'a T) {
 //!         println!("{}", x);
 //!     }
 //! }
 //!
 //! ```
 //!
-//! # Implementation notes
+//! # Implementation details
 //! This implementation uses a combination of terrifying hacks and incomplete features in Rust.
 //! To understand these hacks, it's worth considering a sequence of use cases for async traits
 //! and what is necessary to implement them.

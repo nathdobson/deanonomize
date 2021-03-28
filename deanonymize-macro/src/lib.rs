@@ -8,7 +8,7 @@ extern crate proc_macro;
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as TokenStream2, Group};
 
-use syn::{parse_macro_input, DeriveInput, Item, Ident, ReturnType, Type, FnArg, Visibility, GenericParam, TraitItem, ItemFn, ItemTrait, Attribute, Generics, Signature, ItemImpl, ImplItem, AttributeArgs, WhereClause};
+use syn::{parse_macro_input, DeriveInput, Item, Ident, ReturnType, Type, FnArg, Visibility, GenericParam, TraitItem, ItemFn, ItemTrait, Attribute, Generics, Signature, ItemImpl, ImplItem, AttributeArgs, WhereClause, PathArguments, AngleBracketedGenericArguments};
 use quote::quote;
 use proc_macro2::{Span, TokenTree};
 use syn::parse_quote;
@@ -42,11 +42,12 @@ struct SignatureExtra {
 
 struct GenericsExtra {
     gen_params: Generics,
-    gen_idents_turbofish: TokenStream2,
-    gen_idents_no_lifetimes_turbofish: TokenStream2,
-    gen_idents_brackets: TokenStream2,
+    gen_idents_turbofish: AngleBracketedGenericArguments,
+    gen_idents_no_lifetimes: Vec<TokenStream2>,
+    gen_idents_no_lifetimes_turbofish: AngleBracketedGenericArguments,
+    gen_idents_brackets: AngleBracketedGenericArguments,
     gen_where: Option<WhereClause>,
-    phantom_args: TokenStream2,
+    phantom_args: AngleBracketedGenericArguments,
 }
 
 impl SignatureExtra {
@@ -169,17 +170,16 @@ impl GenericsExtra {
                     quote!([(); #ident])
                 }
             }).collect();
-        let gen_idents_turbofish =
-            if gen_idents.is_empty() { quote!() } else { quote!(::< #( #gen_idents ),* >) };
+        let gen_idents_turbofish = parse_quote!(::< #( #gen_idents ),* >);
         let gen_idents_no_lifetimes_turbofish =
-            if gen_idents_no_lifetimes.is_empty() { quote!() } else { quote!(::< #( #gen_idents_no_lifetimes ),* >) };
-        let gen_idents_brackets =
-            if gen_idents.is_empty() { quote!() } else { quote!(< #( #gen_idents ),* >) };
-        let phantom_args = quote!(< ( #( #phantom_args ),* ) >);
+            parse_quote!(::< #( #gen_idents_no_lifetimes ),* >);
+        let gen_idents_brackets = parse_quote!(< #( #gen_idents ),* >);
+        let phantom_args = parse_quote!(< ( #( #phantom_args ),* ) >);
         let gen_where = gen_params.where_clause.clone();
         GenericsExtra {
             gen_params: gen_params.clone(),
             gen_idents_turbofish,
+            gen_idents_no_lifetimes,
             gen_idents_no_lifetimes_turbofish,
             gen_idents_brackets,
             gen_where,
@@ -204,6 +204,7 @@ fn deanonymize_fn(args: TokenStream, input: &ItemFn) -> TokenStream {
         generics: GenericsExtra {
             gen_params,
             gen_idents_turbofish,
+            gen_idents_no_lifetimes,
             gen_idents_no_lifetimes_turbofish,
             gen_idents_brackets,
             gen_where,
@@ -225,7 +226,7 @@ fn deanonymize_fn(args: TokenStream, input: &ItemFn) -> TokenStream {
     imp.sig.ident = imp_name.clone();
 
     let default_imp =
-        if gen_idents_no_lifetimes_turbofish.is_empty() {
+        if gen_idents_no_lifetimes.is_empty() {
             quote!()
         } else {
             quote! {
@@ -332,7 +333,7 @@ fn deanonymize_trait(_args: TokenStream, input: &ItemTrait) -> TokenStream {
                             parse_quote!(-> Self :: #target #gen_idents_turbofish),
                         );
                     let yielded: Type = match yielded {
-                        ReturnType::Default => parse_quote!("()"),
+                        ReturnType::Default => parse_quote!(()),
                         ReturnType::Type(_, x) => *x,
                     };
                     new_items.push(parse_quote!(type #target #gen_params : ::std::future::Future<Output= #yielded> + Send;));
@@ -416,6 +417,7 @@ fn deanonymize_impl(_args: TokenStream, input: &ItemImpl) -> TokenStream {
                     let GenericsExtra {
                         gen_params,
                         gen_idents_turbofish,
+                        gen_idents_no_lifetimes,
                         gen_idents_no_lifetimes_turbofish,
                         gen_idents_brackets,
                         gen_where,
